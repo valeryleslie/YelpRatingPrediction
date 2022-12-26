@@ -1,0 +1,458 @@
+---
+author: "Valery Leslie Tanada"
+date: "`r format(Sys.Date(), '%D')`"
+output:
+  html_document:
+    df_print: paged
+---
+
+# Libraries Used
+```{r Libraries}
+library(dplyr)
+library(tidyverse)
+library(tidytext)
+library(tidyr)
+library(readr)
+library(lattice)
+library(caret)
+library(wordcloud)
+library(NLP)
+library(RColorBrewer)
+library(wordcloud2)
+library(tm)
+library(SnowballC)
+library(stringi)
+library(stringr)
+library(naivebayes)
+library(dplyr)
+library(ggplot2)
+library(psych)
+library(e1071)
+library(caTools)
+library(FactoMineR)
+library(factoextra)
+library(nnet)
+library(corrplot)
+library(e1071)
+library(randomForest)
+library(datasets)
+library(party)
+```
+
+# Pre-processing Data
+
+### Reading in file
+
+Our headers are as below,
+
+<!-- USE THE CODE CHUNK BELOW -->
+```{r Our headers}
+filePath <- "Data_Final"
+con <- file(filePath, "r")
+varNames <- unlist(strsplit(readLines(con, n = 1), ","))
+varNames[-1]
+```
+
+We read in the data into a dataframe below:
+
+<!-- USE THE CODE CHUNK BELOW -->
+```{r Dataframe}
+# Forming the raw data into a data frame
+data <- read.csv("Data_Final", header = FALSE, col.names = varNames, skip = 1, sep = ",", quote="\"")[,-1]
+# Printing the unique states on the data set
+unique(data$State)
+# Removing state, as subsetted into same state == CA
+data <- data[, -8]
+# Size and first 6 elements of raw data
+dim(data)
+head(data)
+```
+
+### Mutating and cleaning the Star and Elite columns
+
+```{r Dataframe mutating and cleaning - 1}
+# Mutating Elite column to be # of years they are an elite member
+data <- mutate(data, Elite = sapply(stri_split(data$Elite,fixed=','), length))
+# Mutating the Star column to be of binary value : 0 or 1 
+data <- mutate(data, StarB = if_else(Star %in% c(1,2,3), 0, 1))
+# Mutating Star column to be factor 
+data <- mutate(data, Star = as.factor(Star))
+data <- mutate(data, StarB = as.factor(StarB))
+```
+
+### Mutating and cleaning the City column
+
+```{r Dataframe mutating and cleaning - 2}
+# City name changes, Cleaning 
+unique(data$City)
+# Correcting Santa Barbara
+# Mission Canyon is a CDP in Santa Barbara
+data$City[which(data$City %in% c("Santa Barbara", "Santa Barbara ", "Santa Barbara & Ventura Counties", "Santa Barbra", "Santa  Barbara", "Mission Canyon"))] <- "Santa Barbara"
+# Correcting West Hills- a community not a city in Los Angeles
+data$City[which(data$City == "West Hill")] <- "Los Angeles"
+# Correcting Real Goleta to Goleta
+data$City[which(data$City == "Real Goleta")] <- "Goleta"
+# An after look at the city name changes
+table(data$City)
+```
+
+### Mutating and cleaning the Review column
+
+<!-- USE THE CODE CHUNK BELOW -->
+```{r Cleaning reviews}
+# Cleaning the review- removing punctuation, tabs, \, and blanks
+reviews_cleaned <- data$Review
+reviews_cleaned <- tolower(gsub("[^[:alpha:] ]", " ", reviews_cleaned))
+reviews_cleaned <- gsub("[\t\n]", " ", reviews_cleaned)
+reviews_cleaned <- removeWords(reviews_cleaned, words = stopwords(kind = "en"))
+helper_stem <- function(review){
+  vec <- unlist(strsplit(review, split=" ")) #turns into a vector of strings
+  vec <- vec[!(vec=="")] #removes empty variables
+  vec <- stemDocument(vec) #stems the document
+  paste(c(vec), collapse=" ") #concat the vector of strings into one
+}
+
+reviews_cleaned <- unlist(lapply(reviews_cleaned, helper_stem))
+
+data <- data %>% mutate(ReviewClean = reviews_cleaned)
+```
+
+### Mutating and Adding Sentiment Data Columns
+
+Here, we start the sentiment analysis by text mining the written text for individual positive and negative words. While appointing a sentiment "score" could lead to contexts and lost meaning, we will attempt this method first.
+
+```{r Reading in Positive and Negative}
+# Focusing on the Review column to look into sentiment
+data_review <- as.data.frame(data$ReviewClean)
+colnames(data_review) <- "ReviewClean"
+
+# Grouping by row number as a way to track review
+# Tokenizing each review 
+tidyreview <- data_review %>% mutate(Row = row_number()) %>% unnest_tokens(word, ReviewClean)
+
+# Data sentiment finding, using "bing" sentiment dataset for positive and negative counts
+datasent_bing <- tidyreview %>% left_join(get_sentiments("bing")) %>% count(Row, sentiment) %>% pivot_wider(names_from = sentiment, values_from = n, values_fill = 0) %>% mutate (sentiment = positive - negative)
+
+# Inspecting first few rows of the sentiment finding
+head(datasent_bing)
+```
+
+```{r Adding columns from afinn}
+# Focusing on the Review column to look into sentiment
+data_review <- as.data.frame(data$ReviewClean)
+colnames(data_review) <- "ReviewClean"
+
+# Grouping by row number as a way to track review
+# Tokennizing each review 
+tidyreview <- data_review %>% mutate(Row = row_number()) %>% unnest_tokens(word, ReviewClean)
+
+datasent_afinn <-tidyreview %>% 
+  left_join(get_sentiments("afinn")) %>% 
+  group_by(Row) %>% 
+  count(value) %>% 
+  mutate(value = ifelse(is.na(value),0, value),
+         afinn_freq_norm = sum(value*n)/sum(n),
+         afinn_freq = sum(value*n)) %>% 
+  distinct(Row,afinn_freq_norm,afinn_freq)
+
+head(datasent_afinn)
+```
+
+
+```{r Sentiment columns}
+data <- mutate(data, positive = datasent_bing$positive, negative = datasent_bing$negative, sentiment = datasent_bing$sentiment, afinn_freq_norm = datasent_afinn$afinn_freq_norm, afinn_freq = datasent_afinn$afinn_freq)
+```
+
+### Showing a small subset of final cleaned data
+
+``` {r Showing data}
+# Showing the head entries of the dataframe
+head(data, n = 20)
+```
+
+
+### Variable Documentations
+
+- User_id (chr): The ID of the user submitting this review
+- Bus_id (chr): The ID of the business for which the review was given for
+- Star (dbl): The star rating given 
+- Useful (int): The "Useful" tally for the review submitted by the user
+- Cool (int): The "Cool" tally for the review submitted by the user
+- Funny (int): The "Funny" tally for the review submitted by the user
+- Review (chr): The review submitted by the user
+- City (chr): The city location of the business
+- Bus_Ave_Star (dbl): The business' average star rating by all user reviews
+- User_Review_count (int): The amount of reviews posted by user in total on Yelp
+- User_Useful_count (int): The total amount of "Useful" tally grossed by the user across all their reviews
+- User_Funny_count (int): The total amount of "Funny" tally grossed by the user across all their reviews
+- User_Cool_count (int): The total amount of "Cool" tally grossed by the user across all their reviews
+- Elite (chr): All years for which user is named an elite member
+- User_Fans (int): The number of fans the user has on Yelp- being a fan allows you to follow the user's reviews 
+- Users_Ave_Star (dbl): The average star rating submitted by the user on all their reviews on Yelp
+
+### add new vars
+
+# Word Cloud
+
+Making pretty visualization of the disparity and similarities in lexicon used for very bad (1-Star) and stellarly good (5-Star) reviews.
+
+```{r Dividing data}
+reviews_clean_neg <- reviews_cleaned[which(data$Star == 1)]
+reviews_clean_pos <- reviews_cleaned[which(data$Star == 5)]
+```
+
+```{r Corpus for each positive and negative}
+docs_neg <- Corpus(VectorSource(reviews_clean_neg))
+dtm_neg <- DocumentTermMatrix(docs_neg)
+freq_neg <- sort(colSums(as.matrix(dtm_neg)), decreasing=TRUE)
+docs_pos <- Corpus(VectorSource(reviews_clean_pos))
+dtm_pos <- DocumentTermMatrix(docs_pos)
+freq_pos <- sort(colSums(as.matrix(dtm_pos)), decreasing=TRUE)
+```
+
+### Negative Review Wordcloud
+
+```{r Generating word cloud with cleaned review data}
+set.seed(123)
+wordcloud(names(freq_neg), freq = freq_neg, min.freq = 1, max.words=100, random.order=FALSE, rot.per=0.35, scale=c(3.5,0.25), colors=brewer.pal(8, "Dark2"))
+```
+
+### Positive Review Wordcloud
+
+```{r wordcloud pos}
+wordcloud(names(freq_pos), freq = freq_pos, min.freq = 1, max.words=100,random.order=FALSE, rot.per=0.35, scale=c(3.5,0.25), colors=brewer.pal(8, "Dark2"))
+```
+
+### Test and Training Data
+
+Here, we split the data into 80:20 ratio for training/fitting and testing.
+
+<!-- USE THE CODE CHUNK BELOW -->
+```{r Splitting Testing and Training Data}
+set.seed(123)
+# Splitting by 80-20 ratio
+i.train <- sample(1:nrow(data), 0.8 * nrow(data), replace = F)
+train <- data[i.train,]
+test <- data[-i.train,]
+```
+
+# Predictive Algorithm Building
+
+<!-- USE THE CODE CHUNK BELOW -->
+```{r Correlation Matrix}
+# We will only be using numerical data
+numerical_cols <- c("StarB", "Useful", "Cool", "Funny", "Bus_Ave_Star", "User_Review_count", "User_Useful_count", "User_Funny_count",  "User_Cool_count",   "Elite", "User_Fans", "Users_Ave_Star", "positive", "negative", "sentiment", "afinn_freq_norm", "afinn_freq")
+corr_num <- cor(data[, numerical_cols[-1]])
+corrplot(corr_num, type = "upper", order = "hclust", col = brewer.pal(n = 8, name = "RdYlBu"))
+corrplot(corr_num, method = "number")
+```
+
+As there exists a lot of multicollinearity, we will perform a PCA analysis to remove that. Our methods Naive Baye's and multinom require the assumption of independence between variables. 
+
+<!-- USE THE CODE CHUNK BELOW -->
+```{r Principal Component Analysis}
+numerical_cols <- c("StarB", "Useful", "Cool", "Funny", "Bus_Ave_Star", "User_Review_count", "User_Useful_count", "User_Funny_count",  "User_Cool_count",   "Elite", "User_Fans", "Users_Ave_Star", "positive", "negative", "sentiment", "afinn_freq_norm", "afinn_freq")
+numerical_train <- train[, numerical_cols]
+numerical_test <- test[, numerical_cols]
+datapca <- prcomp(numerical_train[,-1], center = TRUE, scale. = TRUE)
+summary(datapca)
+```
+
+As the first 8 variables would explain 94% of the variability of the data, we will intend to use the first 8 variables only in our models below.
+
+now, we can see no more problem with multicollinearity yay
+
+<!-- USE THE CODE CHUNK BELOW -->
+```{r Making Training and Testing Data by PCA}
+# Training Data by PCA
+trg <- predict(datapca, numerical_train)
+datapca_train <- data.frame(trg, numerical_train[,1])
+colnames(datapca_train)[ncol(datapca_train)] <- "StarB"
+head(datapca_train)
+# Testing Data by PCA
+tst <- predict(datapca, numerical_test)
+datapca_test <- data.frame(tst, numerical_test[,1])
+colnames(datapca_test)[ncol(datapca_test)] <- "StarB"
+head(datapca_test)
+```
+
+### Method: Naive Baye's
+
+# Before performing PCA
+
+<!-- USE THE CODE CHUNK BELOW -->
+```{r Naive Bayes without PCA}
+nbmodel <- naive_bayes(StarB ~., data = numerical_train)
+summary(nbmodel)
+# Confusion Matrix - Training Data
+prednb_r <- predict(nbmodel, numerical_train[,-1])
+tabnb_r <- table(prednb_r, numerical_train[,1])
+tabnb_r
+sum(diag(tabnb_r)) / sum(tabnb_r)
+# Confusion Matrix - Test Data
+prednb_e <- predict(nbmodel, numerical_test[,-1])
+tabnb_e <- table(prednb_e, numerical_test[,1])
+tabnb_e
+sum(diag(tabnb_e)) / sum(tabnb_e)
+```
+
+# After performing PCA
+
+<!-- USE THE CODE CHUNK BELOW -->
+```{r Naive Bayes with PCA}
+nbmodel_PCA <- naive_bayes(StarB ~ PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8, data = datapca_train)
+summary(nbmodel_PCA)
+# Confusion Matrix - Training Data
+prednb_r_PCA <- predict(nbmodel_PCA, datapca_train[,-c(9:17)])
+tabnb_r_PCA <- table(prednb_r_PCA, datapca_train[,17])
+tabnb_r_PCA
+sum(diag(tabnb_r_PCA)) / sum(tabnb_r_PCA)
+# Confusion Matrix - Test Data
+prednb_e_PCA <- predict(nbmodel_PCA, datapca_test[,-c(9:17)])
+tabnb_e_PCA <- table(prednb_e_PCA, datapca_test[,17])
+tabnb_e_PCA
+sum(diag(tabnb_e_PCA)) / sum(tabnb_e_PCA)
+```
+
+### Method: Multinomial Logistic Regression
+
+# Before performing PCA
+
+<!-- USE THE CODE CHUNK BELOW -->
+```{r Multinom without PCA}
+mnmodel <- multinom(StarB ~., data = numerical_train)
+summary(mnmodel)
+```
+
+```{r Confusion Table without PCA}
+predmn_r <- table(Predicted=predict(mnmodel, numerical_train[,-1], type="class"), True=numerical_train$StarB) 
+predmn_r
+sum(diag(predmn_r)) / sum(predmn_r)
+```
+# After performing PCA 
+
+<!-- USE THE CODE CHUNK BELOW -->
+```{r Multinom with PCA}
+mnmodel_PCA <- multinom(StarB ~ PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8, data = datapca_train)
+summary(mnmodel_PCA)
+```
+
+### Method: Linear SVM
+
+# Before performing PCA
+
+<!-- USE THE CODE CHUNK BELOW -->
+```{r Linear SVM}
+data_svm_r <- numerical_train[c(1,5,12,15)] #starB, bus_ave_star, users_ave_star, sentiment
+data_svm_e <- numerical_test[c(1,5,12,15)]
+
+# testing bus_avg_star and sentiment
+svmmodel1 <- svm(as.factor(StarB)~Bus_Ave_Star+sentiment, data = data_svm_r, kernel = "linear", cost = 10, scale = FALSE)
+print(svmmodel1)
+plot(svmmodel1, data_svm_r[c(1,2,4)])
+# Confusion Matrix - Training Data
+predsvm_r <- predict(svmmodel1, data_svm_r[,-1])
+tabsvm_r <- table(predsvm_r, data_svm_r[,1])
+tabsvm_r
+sum(diag(tabsvm_r)) / sum(tabsvm_r)
+# Confusion Matrix - Test Data
+predsvm_e <- predict(svmmodel1, data_svm_e[,-1])
+tabsvm_e <- table(predsvm_e, data_svm_e[,1])
+tabsvm_e
+sum(diag(tabsvm_e)) / sum(tabsvm_e)
+
+# testing users_avg_star and sentiment
+svmmodel2 <- svm(as.factor(StarB)~Users_Ave_Star+sentiment, data = data_svm_r, kernel = "linear", cost = 10, scale = FALSE)
+print(svmmodel2)
+plot(svmmodel2, data_svm_r[c(1,3,4)])
+# Confusion Matrix - Training Data
+predsvm_r <- predict(svmmodel2, data_svm_r[,-1])
+tabsvm_r <- table(predsvm_r, data_svm_r[,1])
+tabsvm_r
+sum(diag(tabsvm_r)) / sum(tabsvm_r)
+# Confusion Matrix - Test Data
+predsvm_e <- predict(svmmodel2, data_svm_e[,-1])
+tabsvm_e <- table(predsvm_e, data_svm_e[,1])
+tabsvm_e
+sum(diag(tabsvm_e)) / sum(tabsvm_e)
+```
+
+# After performing PCA
+<!-- USE THE CODE CHUNK BELOW -->
+```{r Linear SVM with PCA}
+svmmodel1 <- svm(as.factor(StarB)~Bus_Ave_Star+sentiment, data = data_svm_r, kernel = "radial", cost = 10, scale = FALSE)
+print(svmmodel1)
+plot(svmmodel1, data_svm_r[c(1,2,4)])
+# Confusion Matrix - Training Data
+predsvm_r <- predict(svmmodel1, data_svm_r[,-1])
+tabsvm_r <- table(predsvm_r, data_svm_r[,1])
+tabsvm_r
+sum(diag(tabsvm_r)) / sum(tabsvm_r)
+# Confusion Matrix - Test Data
+predsvm_e <- predict(svmmodel1, data_svm_e[,-1])
+tabsvm_e <- table(predsvm_e, data_svm_e[,1])
+tabsvm_e
+sum(diag(tabsvm_e)) / sum(tabsvm_e)
+
+# testing users_avg_star and sentiment
+svmmodel2 <- svm(as.factor(StarB)~Users_Ave_Star+sentiment, data = data_svm_r, kernel = "radial", cost = 10, scale = FALSE)
+print(svmmodel2)
+plot(svmmodel2, data_svm_r[c(1,3,4)])
+# Confusion Matrix - Training Data
+predsvm_r <- predict(svmmodel2, data_svm_r[,-1])
+tabsvm_r <- table(predsvm_r, data_svm_r[,1])
+tabsvm_r
+sum(diag(tabsvm_r)) / sum(tabsvm_r)
+# Confusion Matrix - Test Data
+predsvm_e <- predict(svmmodel2, data_svm_e[,-1])
+tabsvm_e <- table(predsvm_e, data_svm_e[,1])
+tabsvm_e
+sum(diag(tabsvm_e)) / sum(tabsvm_e)
+```
+
+
+### Method: Random Forest
+
+# Before performing PCA
+
+<!-- USE THE CODE CHUNK BELOW -->
+```{r Random Forest without PCA}
+rfmodel <- randomForest(as.factor(StarB) ~., data = numerical_train)
+print(rfmodel)
+plot(rfmodel)
+# cforest(StarB ~ ., data=numerical_train, controls=cforest_control(mtry=2, mincriterion=0))
+# Confusion Matrix - Training Data
+predrf_r <- predict(rfmodel, numerical_train[,-1])
+tabrf_r <- table(predrf_r, numerical_train[,1])
+tabrf_r
+sum(diag(tabrf_r)) / sum(tabrf_r)
+confusionMatrix(predrf_r, numerical_train$StarB)
+# Confusion Matrix - Test Data
+predrf_e <- predict(rfmodel, numerical_test[,-1])
+tabrf_e <- table(predrf_e, numerical_test[,1])
+tabrf_e
+sum(diag(tabrf_e)) / sum(tabrf_e)
+confusionMatrix(predrf_e, numerical_test$StarB)
+```
+
+# After performing PCA
+<!-- USE THE CODE CHUNK BELOW -->
+```{r Random Forest with PCA}
+rfmodel_PCA <- randomForest(as.factor(StarB) ~ PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8, data = datapca_train)
+print(rfmodel_PCA)
+plot(rfmodel_PCA)
+# Confusion Matrix - Training Data
+predrf_r_PCA <- predict(rfmodel_PCA, datapca_train[,-c(9:17)])
+tabrf_r_PCA <- table(predrf_r_PCA, datapca_train[,17])
+tabrf_r_PCA
+sum(diag(tabrf_r_PCA)) / sum(tabrf_r_PCA)
+confusionMatrix(predrf_r_PCA, numerical_train$StarB)
+# Confusion Matrix - Test Data
+predrf_e_PCA <- predict(rfmodel_PCA, datapca_test[,-c(9:17)])
+tabrf_e_PCA <- table(predrf_e_PCA, datapca_test[,17])
+tabrf_e_PCA
+sum(diag(tabrf_e_PCA)) / sum(tabrf_e_PCA)
+confusionMatrix(predrf_e_PCA, numerical_test$StarB)
+```
+
+
